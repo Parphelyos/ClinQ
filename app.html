@@ -1720,11 +1720,19 @@ async function cqsPush(){
  const j=await r.json();cqsMeta.fileId=j.id;cqsMeta.version=j.version;
  if(cqs.rev===rev)cqsMeta.dirty=false;else cqs.again=true;cqsSaveMeta()}
 
+/* PARCHE: escritura segura de la copia de Drive en localStorage. Si no cabe, se restaura lo anterior (no se pierde nada, no se toca Drive ni las imágenes). */
+function cqsSafeWrite(fn){
+ const snap={};CQS_KEYS.forEach(k=>{snap[k]=localStorage.getItem(k)});
+ try{fn()}catch(e){
+  try{CQS_KEYS.forEach(k=>{if(snap[k]===null)localStorage.removeItem(k);else cqsOrigSet.call(localStorage,k,snap[k])})}catch(_){}
+  if(e&&(e.name==='QuotaExceededError'||e.code===22||e.code===1014||/quota/i.test(String(e.message||'')))){
+   throw Object.assign(new Error('Tu banco en Drive es más grande de lo que cabe en el almacenamiento local de este navegador (~5 MB). No se cambió nada local y tu copia en Drive NO fue modificada. Usa la PC o sube el límite del navegador.'),{quota:true})}
+  throw e}}
 /* Aplicar / combinar datos remotos */
 function cqsReloadState(){bank=loadBank();loadSessions();refreshAll();if(currentQuiz)renderQuizQuestion();else renderQuizStart()}
 function cqsApplyRemote(remote){
  const d=(remote&&remote.data)||{};cqs.applying=true;
- try{CQS_KEYS.forEach(k=>{if(typeof d[k]==='string')localStorage.setItem(k,d[k]);else localStorage.removeItem(k)})}finally{cqs.applying=false}
+ try{cqsSafeWrite(()=>{CQS_KEYS.forEach(k=>{if(typeof d[k]==='string')localStorage.setItem(k,d[k]);else localStorage.removeItem(k)})})}finally{cqs.applying=false}
  cqsReloadState()}
 function cqsMerge(remote){
  const d=(remote&&remote.data)||{},pj=(s,f)=>{try{const x=JSON.parse(s);return x==null?f:x}catch(e){return f}};
@@ -1738,12 +1746,13 @@ function cqsMerge(remote){
  (ls.sessions||[]).forEach(s=>s&&s.sid&&sm.set(s.sid,s));
  (rs.sessions||[]).forEach(s=>{if(!s||!s.sid)return;const l=sm.get(s.sid);if(!l||sc(s)>sc(l))sm.set(s.sid,s)});
  cqs.applying=true;
- try{localStorage.setItem(DBKEY,JSON.stringify([...m.values()]));localStorage.setItem(SESSKEY,JSON.stringify({sessions:[...sm.values()],active:ls.active||rs.active||null}))}finally{cqs.applying=false}
+ try{cqsSafeWrite(()=>{localStorage.setItem(DBKEY,JSON.stringify([...m.values()]));localStorage.setItem(SESSKEY,JSON.stringify({sessions:[...sm.values()],active:ls.active||rs.active||null}))})}finally{cqs.applying=false}
  cqsReloadState()}
 
 /* Sincronización principal */
 async function cqsSync(){
  if(!cqsMeta.signedIn)return;
+ if(cqs.quotaUntil&&Date.now()<cqs.quotaUntil)return;
  if(cqs.busy){cqs.again=true;return}
  cqs.pend=0;clearTimeout(cqs.timer);cqs.timer=null;
  if(!cqsTokenOk()){cqsSetStatus('needslogin','La sesión de Google caducó. Haz clic para reconectar.');cqsArm();return}
@@ -1770,7 +1779,7 @@ async function cqsSync(){
    if(e.status===403&&/accessNotConfigured|not been used|is disabled/i.test(m))m='Activa la API de Google Drive en tu proyecto de Google Cloud.';
    else if(e instanceof TypeError)m='Sin conexión con Google. Reintentando…';
    const was=cqs.state==='error';cqsSetStatus('error',m);if(!was)notify('Sincronización: '+m);
-   cqs.retry=setTimeout(cqsSync,30000)}
+   if(e.quota)cqs.quotaUntil=Date.now()+10*60*1000;else cqs.retry=setTimeout(cqsSync,30000)}
  }finally{
   cqs.busy=false;
   if(cqs.again&&!failed){cqs.again=false;cqsSync()}else cqs.again=false}}
